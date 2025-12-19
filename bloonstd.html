@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Animal Kingdom: Bloons Tower Defense</title>
+    <style>
+        body { margin: 0; background: #1a1a1a; color: white; font-family: 'Segoe UI', sans-serif; display: flex; flex-direction: column; align-items: center; user-select: none; overflow-y: auto; min-height: 100vh; }
+        #layout { display: flex; flex-direction: row; align-items: flex-start; margin: 10px auto; gap: 15px; max-width: 1150px; }
+        #main-area { display: flex; flex-direction: column; }
+        #game-container { position: relative; border: 4px solid #444; box-shadow: 0 0 20px rgba(0,0,0,0.5); background: #27ae60; overflow: hidden; }
+        canvas { display: block; }
+        #side-controls { display: flex; flex-direction: column; gap: 10px; padding-top: 4px; }
+        #ui { width: 950px; background: #333; padding: 10px 15px; display: grid; grid-template-columns: 160px 1fr 280px; gap: 15px; border-radius: 0 0 10px 10px; border: 1px solid #555; box-sizing: border-box; }
+        .shop { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
+        .shop-item { background: #444; padding: 4px; border-radius: 4px; cursor: grab; text-align: center; border: 2px solid transparent; transition: 0.2s; }
+        .shop-item:hover { background: #555; }
+        .shop-item.active { border-color: #f1c40f; background: #5d5d5d; }
+        .shop-item span { display: block; font-size: 1.2rem; }
+        .shop-item label { font-size: 0.55rem; font-weight: bold; }
+        #evolution-panel { background: #222; padding: 8px; border-radius: 6px; border: 1px inset #444; display: flex; flex-direction: column; min-height: 120px; box-sizing: border-box; }
+        .btn { padding: 10px; cursor: pointer; border: none; border-radius: 4px; font-weight: bold; color: white; transition: 0.2s; text-transform: uppercase; width: 130px; box-sizing: border-box; }
+        .btn-start { background: #e67e22; height: 70px; font-size: 1rem; }
+        .btn-pause { background: #3498db; }
+        .btn-speed { background: #95a5a6; }
+        .btn-speed.fast { background: #f1c40f; color: #000; }
+        .evolve-btn { background: #9b59b6; margin-top: 5px; width: 100%; font-size: 0.8rem; }
+        .sell-btn { background: #c0392b; margin-top: 5px; font-size: 0.75rem; width: 100%; }
+        #evo-desc { font-size: 0.75rem; color: #bbb; margin-top: 3px; font-style: italic; }
+        .ability-text { color: #f1c40f; font-weight: bold; font-size: 0.8rem; margin-top: 2px; }
+        .stats div { margin-bottom: 2px; font-size: 0.9rem; }
+    </style>
+</head>
+<body>
+    <div id="layout">
+        <div id="main-area">
+            <div id="game-container">
+                <canvas id="gameCanvas" width="950" height="500"></canvas>
+            </div>
+            <div id="ui">
+                <div class="stats">
+                    <div>❤️ Lives: <b id="lives">20</b></div>
+                    <div>💰 Money: <b id="money">70</b></div>
+                    <div>🎈 Round: <b id="round">0</b></div>
+                </div>
+                <div class="shop" id="shop"></div>
+                <div id="evolution-panel">
+                    <div id="evo-info" style="text-align:center; font-weight:bold; font-size: 0.9rem;">Select an Animal</div>
+                    <div id="evo-desc">Drag from shop to begin.</div>
+                    <div id="ability-info" class="ability-text"></div>
+                    <button id="evolve-btn" class="btn evolve-btn" style="display:none" onclick="evolveSelected()">Evolve</button>
+                    <button id="sell-btn" class="btn sell-btn" style="display:none" onclick="sellSelected()">Sell</button>
+                </div>
+            </div>
+        </div>
+        <div id="side-controls">
+            <button class="btn btn-start" id="startBtn" onclick="startWave()">Start<br>Round</button>
+            <button class="btn btn-pause" id="pauseBtn" onclick="togglePause()">Pause</button>
+            <button class="btn btn-speed" id="speedBtn" onclick="toggleSpeed()">Speed: 1x</button>
+        </div>
+    </div>
+
+<script>
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    function playSfx(type, pitch = 1) {
+        if (isPaused) return;
+        try {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain); gain.connect(audioCtx.destination);
+            if (type === 'laser') osc.type = 'sawtooth';
+            else if (type === 'meteor') osc.type = 'sawtooth';
+            else if (type === 'bubble') osc.type = 'sine';
+            else if (type === 'boomerang') osc.type = 'triangle';
+            else osc.type = 'sine';
+            osc.frequency.setValueAtTime((type === 'laser' ? 1100 : type === 'meteor' ? 120 : 500) * pitch, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(10, audioCtx.currentTime + 0.15);
+            gain.gain.setValueAtTime(0.02, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.15);
+            osc.start(); osc.stop(audioCtx.currentTime + 0.15);
+        } catch(e) {}
+    }
+
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    let lives = 20, money = 70, round = 0, isWaveActive = false, isPaused = false, gameSpeed = 1, shake = 0;
+    let enemies = [], towers = [], projectiles = [], hitEffects = [];
+    let selectedType = null, selectedTowerInstance = null, mouseX = 0, mouseY = 0;
+
+    const PATH = [{x: -50, y: 250}, {x: 200, y: 250}, {x: 200, y: 100}, {x: 450, y: 100}, {x: 450, y: 400}, {x: 750, y: 400}, {x: 750, y: -50}];
+    const WATER_RECT = { x: 380, y: 0, w: 140, h: 500 };
+    
+    // 10 BALLOON DIFFICULTIES
+    const BALLOON_TIERS = [
+        { hp: 1, color: '#e74c3c' },   // Red
+        { hp: 2, color: '#3498db' },   // Blue
+        { hp: 3, color: '#2ecc71' },   // Green
+        { hp: 4, color: '#f1c40f' },   // Yellow
+        { hp: 6, color: '#9b59b6' },   // Purple
+        { hp: 8, color: '#ecf0f1' },   // White
+        { hp: 12, color: '#cd7f32' },  // Bronze
+        { hp: 20, color: '#c0c0c0' },  // Silver
+        { hp: 35, color: '#ffd700' },  // Gold
+        { hp: 60, color: '#2c3e50' }   // Obsidian
+    ];
+
+    const EVOLUTIONS = {
+        trex: ["Laser HUD", "Beam Intensity", "ULTIMATE: METEOR STRIKE"],
+        kangaroo: ["Pocket Launch", "Agile Bounce", "ULTIMATE: BABY JOEY"],
+        eagle: ["Eagle Eye", "Steel Talons", "ULTIMATE: SKY STRIKE"],
+        hedgehog: ["Sharper Quills", "Rapid Spin", "ULTIMATE: QUILL NOVA"],
+        bear: ["Sticky Honey", "Heavy Paws", "ULTIMATE: HONEY TRAP"],
+        monkey: ["Long Arm", "Steel Darts", "ULTIMATE: TRIPLE SHOT"],
+        turtle: ["Bubble Pump", "Hydro Shell", "ULTIMATE: TSUNAMI"],
+        snake: ["Neurotoxin", "Acid Spat", "ULTIMATE: KING COBRA"]
+    };
+
+    const ANIMAL_TYPES = {
+        trex: { label: '🦖', name: 'T-Rex', cost: 250, range: 210, fireRate: 65, damage: 5, type: 'land', attack: 'laser' },
+        kangaroo: { label: '🦘', name: 'Kangaroo', cost: 140, range: 160, fireRate: 45, damage: 2, type: 'land', attack: 'boomerang' },
+        eagle: { label: '🦅', name: 'Eagle', cost: 180, range: 350, fireRate: 75, damage: 3, type: 'land', attack: 'talon' },
+        hedgehog: { label: '🦔', name: 'Hedgehog', cost: 130, range: 100, fireRate: 80, damage: 1.5, type: 'land', attack: 'quill' },
+        bear: { label: '🐻', name: 'Bear', cost: 100, range: 120, fireRate: 45, damage: 1, type: 'land', attack: 'honey' },
+        monkey: { label: '🐒', name: 'Monkey', cost: 60, range: 135, fireRate: 45, damage: 1, type: 'land', attack: 'dart' },
+        turtle: { label: '🐢', name: 'Turtle', cost: 150, range: 170, fireRate: 55, damage: 2, type: 'water', attack: 'bubble' },
+        snake: { label: '🐍', name: 'Snake', cost: 75, range: 110, fireRate: 35, damage: 0.5, type: 'land', attack: 'venom' }
+    };
+
+    class Tower {
+        constructor(x, y, data, key) {
+            this.x = x; this.y = y; this.key = key; this.level = 0; this.cooldown = 0; this.anim = 0;
+            this.totalSpent = data.cost; this.applyStats(data);
+        }
+        applyStats(data) {
+            this.data = data;
+            this.range = data.range + (this.level * 35);
+            this.fireRate = Math.max(10, data.fireRate - (this.level * 9));
+            this.damage = data.damage + (this.level * 3.5);
+        }
+        update() {
+            if (this.cooldown > 0) this.cooldown -= gameSpeed;
+            if (this.anim > 0) this.anim -= gameSpeed;
+            if (this.cooldown <= 0) {
+                const target = enemies.find(e => Math.hypot(e.x - this.x, e.y - this.y) < this.range);
+                if (target) { this.fire(target); this.cooldown = this.fireRate; this.anim = 12; }
+            }
+        }
+        fire(target) {
+            const isUlt = this.level === 3;
+            if (isUlt && this.key === 'trex') {
+                projectiles.push(new Projectile(target.x, -200, target, this.damage * 8, 0, 'meteor', true));
+            } else if (this.key === 'hedgehog') {
+                const count = isUlt ? 16 : 8;
+                for(let i=0; i<count; i++) projectiles.push(new Projectile(this.x, this.y, null, this.damage, i*(Math.PI*2/count), 'quill', isUlt));
+            } else if (isUlt && this.key === 'monkey') {
+                const angle = Math.atan2(target.y - this.y, target.x - this.x);
+                projectiles.push(new Projectile(this.x, this.y, target, this.damage, angle, 'dart', true));
+                projectiles.push(new Projectile(this.x, this.y, target, this.damage, angle - 0.2, 'dart', true));
+                projectiles.push(new Projectile(this.x, this.y, target, this.damage, angle + 0.2, 'dart', true));
+            } else {
+                const originY = this.key === 'trex' ? this.y - 12 : this.y;
+                projectiles.push(new Projectile(this.x, originY, target, this.damage, Math.atan2(target.y - originY, target.x - this.x), this.data.attack, isUlt));
+                if (isUlt && this.key === 'kangaroo' && Math.random() < 0.5) projectiles.push(new Projectile(this.x, this.y, target, this.damage, Math.atan2(target.y-this.y, target.x-this.x), 'joey', true));
+            }
+            playSfx(this.data.attack, 1 + this.level * 0.1);
+        }
+        draw() {
+            ctx.save();
+            if (this.anim > 0) { ctx.translate(this.x, this.y); ctx.scale(1.25, 1.25); ctx.translate(-this.x, -this.y); }
+            ctx.font = `34px Arial`; ctx.textAlign = 'center';
+            ctx.fillText(this.data.label, this.x, this.y + 12);
+            if (this.key === 'trex' && this.anim > 0) { ctx.fillStyle = 'red'; ctx.beginPath(); ctx.arc(this.x + 5, this.y - 12, 3, 0, Math.PI*2); ctx.fill(); }
+            ctx.restore();
+            if (selectedTowerInstance === this) {
+                ctx.beginPath(); ctx.arc(this.x, this.y, this.range, 0, Math.PI*2);
+                ctx.fillStyle = 'rgba(255,255,255,0.05)'; ctx.fill(); ctx.strokeStyle = '#f1c40f'; ctx.stroke();
+            }
+            if (this.level > 0) {
+                ctx.fillStyle = this.level === 3 ? '#e67e22' : '#f1c40f'; ctx.font = 'bold 12px Arial';
+                ctx.fillText(this.level === 3 ? "ULTIMATE" : "★".repeat(this.level), this.x, this.y - 28);
+            }
+        }
+    }
+
+    class Projectile {
+        constructor(x, y, target, damage, angle, type, isUlt) {
+            this.x = x; this.y = y; this.target = target; this.damage = damage; this.angle = angle;
+            this.type = type; this.isUlt = isUlt; this.speed = 13; this.life = 0;
+            if (type === 'meteor') this.speed = 9; if (type === 'boomerang') this.speed = 11;
+        }
+        update() {
+            this.life += gameSpeed;
+            if (this.type === 'meteor') {
+                this.y += this.speed * gameSpeed;
+                if (this.target && this.y >= this.target.y) {
+                    shake = 20; hitEffects.push(new HitEffect(this.x, this.y, '#ff4500', 130));
+                    enemies.forEach(e => { if (Math.hypot(e.x - this.x, e.y - this.y) < 140) e.hp -= this.damage; });
+                    playSfx('meteor'); return true;
+                }
+            } else if (this.type === 'boomerang') {
+                this.angle += 0.28 * gameSpeed;
+                this.x += Math.cos(this.angle - this.life*0.04) * this.speed * gameSpeed;
+                this.y += Math.sin(this.angle - this.life*0.04) * this.speed * gameSpeed;
+            } else {
+                this.x += (Math.cos(this.angle) * this.speed) * gameSpeed;
+                this.y += (Math.sin(this.angle) * this.speed) * gameSpeed;
+            }
+            for (let e of enemies) {
+                if (Math.hypot(e.x - this.x, e.y - this.y) < 26) {
+                    if (this.isUlt && this.type === 'talon') { hitEffects.push(new HitEffect(this.x, this.y, '#f1c40f', 95)); enemies.forEach(o => { if (Math.hypot(o.x-this.x,o.y-this.y) < 85) o.hp -= this.damage * 0.6; }); }
+                    if (this.isUlt && this.type === 'bubble') { hitEffects.push(new HitEffect(this.x, this.y, '#3498db', 120)); enemies.forEach(o => { if (Math.hypot(o.x-this.x,o.y-this.y) < 110) o.hp -= this.damage; }); }
+                    e.hp -= this.damage; if (this.type === 'honey' || this.type === 'venom') e.slowed = 75;
+                    hitEffects.push(new HitEffect(this.x, this.y, this.type === 'laser' ? 'red' : 'white', 25));
+                    playSfx('pop'); if (this.type !== 'boomerang') return true;
+                }
+            }
+            return (this.x < -300 || this.x > 1250 || this.y > 800 || this.y < -300 || this.life > 250);
+        }
+        draw() {
+            ctx.save(); ctx.translate(this.x, this.y); ctx.rotate(this.angle);
+            if (this.type === 'boomerang') {
+                ctx.strokeStyle = this.isUlt ? '#f1c40f' : '#fff'; ctx.lineWidth = 5;
+                ctx.beginPath(); ctx.moveTo(-12, -12); ctx.lineTo(12, 0); ctx.lineTo(-12, 12); ctx.stroke();
+            } else if (this.type === 'laser') {
+                ctx.fillStyle = 'red'; ctx.shadowBlur = 10; ctx.shadowColor = 'red';
+                ctx.fillRect(0, -2, 30, 4);
+            } else if (this.type === 'meteor') {
+                ctx.fillStyle = '#ff4500'; ctx.beginPath(); ctx.arc(0, 0, 38, 0, Math.PI*2); ctx.fill();
+                ctx.fillStyle = '#f39c12'; ctx.beginPath(); ctx.arc(-14, -14, 14, 0, Math.PI*2); ctx.fill();
+            } else if (this.type === 'bubble') {
+                ctx.strokeStyle = '#fff'; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(0, 0, 8, 0, Math.PI*2); ctx.stroke();
+            } else if (this.type === 'joey') {
+                ctx.font = "24px Arial"; ctx.fillText("👶", 0, 0);
+            } else {
+                ctx.fillStyle = this.isUlt ? '#f1c40f' : '#333';
+                ctx.beginPath(); ctx.arc(0, 0, 6, 0, Math.PI*2); ctx.fill();
+            }
+            ctx.restore();
+        }
+    }
+
+    class HitEffect {
+        constructor(x, y, color, size) { this.x = x; this.y = y; this.color = color; this.size = size; this.life = 1.0; }
+        draw() { ctx.globalAlpha = this.life; ctx.strokeStyle = this.color; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(this.x, this.y, this.size * (1 - this.life), 0, Math.PI*2); ctx.stroke(); this.life -= 0.12; ctx.globalAlpha = 1.0; }
+    }
+
+    class Enemy {
+        constructor(tier) { 
+            this.tier = tier; 
+            this.hp = BALLOON_TIERS[tier].hp * (1 + round * 0.05); // Scaling health per round
+            this.x = PATH[0].x; this.y = PATH[0].y; this.node = 1; 
+            this.speed = 1.28 + (round * 0.04); this.slowed = 0; 
+        }
+        update() {
+            let s = (this.slowed > 0 ? this.speed * 0.4 : this.speed) * gameSpeed;
+            if (this.slowed > 0) this.slowed -= gameSpeed;
+            const target = PATH[this.node]; const dist = Math.hypot(target.x - this.x, target.y - this.y);
+            this.x += (target.x - this.x) / dist * s; this.y += (target.y - this.y) / dist * s;
+            if (dist < 5 * gameSpeed) { this.node++; if (this.node >= PATH.length) { lives--; this.hp = 0; } }
+        }
+        draw() {
+            const currentTier = Math.max(0, Math.min(BALLOON_TIERS.length - 1, this.tier));
+            ctx.fillStyle = this.slowed > 0 ? '#f39c12' : BALLOON_TIERS[currentTier].color;
+            ctx.beginPath(); ctx.ellipse(this.x, this.y, 17, 21, 0, 0, Math.PI * 2); ctx.fill();
+            if (this.tier >= 8) { // Boss glow for obsidian tiers
+                ctx.strokeStyle = 'rgba(255,255,255,0.8)'; ctx.lineWidth = 3; ctx.stroke();
+            } else {
+                ctx.strokeStyle = 'rgba(0,0,0,0.2)'; ctx.stroke();
+            }
+        }
+    }
+
+    function togglePause() { isPaused = !isPaused; document.getElementById('pauseBtn').innerText = isPaused ? "Resume" : "Pause"; }
+    function toggleSpeed() { gameSpeed = (gameSpeed === 1) ? 2.5 : 1; document.getElementById('speedBtn').innerText = `Speed: ${gameSpeed}x`; document.getElementById('speedBtn').classList.toggle('fast', gameSpeed > 1); }
+
+    canvas.addEventListener('mousemove', (e) => { const rect = canvas.getBoundingClientRect(); mouseX = e.clientX - rect.left; mouseY = e.clientY - rect.top; });
+    canvas.addEventListener('mousedown', () => {
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        if (selectedType) {
+            const data = ANIMAL_TYPES[selectedType];
+            const inWater = (mouseX > WATER_RECT.x && mouseX < WATER_RECT.x + WATER_RECT.w);
+            if (((data.type === 'water' && inWater) || (data.type === 'land' && !inWater)) && money >= data.cost) { towers.push(new Tower(mouseX, mouseY, data, selectedType)); money -= data.cost; selectedType = null; document.querySelectorAll('.shop-item').forEach(el => el.classList.remove('active')); }
+            return;
+        }
+        selectedTowerInstance = towers.find(t => Math.hypot(t.x - mouseX, t.y - mouseY) < 30) || null; updateEvoUI();
+    });
+
+    function updateEvoUI() {
+        const info = document.getElementById('evo-info'), desc = document.getElementById('evo-desc');
+        const btn = document.getElementById('evolve-btn'), ab = document.getElementById('ability-info'), sellBtn = document.getElementById('sell-btn');
+        if (selectedTowerInstance) {
+            const sellPrice = Math.floor(selectedTowerInstance.totalSpent * 0.7); sellBtn.style.display = 'block'; sellBtn.innerText = `Sell for $${sellPrice}`;
+            if (selectedTowerInstance.level < 3) {
+                const cost = (selectedTowerInstance.level + 1) * 150;
+                info.innerHTML = `${selectedTowerInstance.data.name} Lv ${selectedTowerInstance.level}`;
+                desc.innerHTML = `Evolve: ${EVOLUTIONS[selectedTowerInstance.key][selectedTowerInstance.level]} <br>Cost: $${cost}`;
+                btn.style.display = 'block'; btn.disabled = money < cost; ab.innerText = "";
+            } else { info.innerHTML = `${selectedTowerInstance.data.name} ULTIMATE`; desc.innerHTML = "Evolution Complete!"; btn.style.display = 'none'; ab.innerText = "SPECIAL ABILITY ACTIVE"; }
+        } else { info.innerText = "Select an Animal"; desc.innerText = "Drag and drop to defend."; btn.style.display = 'none'; sellBtn.style.display = 'none'; ab.innerText = ""; }
+    }
+
+    function evolveSelected() { const cost = (selectedTowerInstance.level + 1) * 150; if (money >= cost) { money -= cost; selectedTowerInstance.totalSpent += cost; selectedTowerInstance.level++; selectedTowerInstance.applyStats(ANIMAL_TYPES[selectedTowerInstance.key]); updateEvoUI(); } }
+    function sellSelected() { money += Math.floor(selectedTowerInstance.totalSpent * 0.7); towers = towers.filter(t => t !== selectedTowerInstance); selectedTowerInstance = null; updateEvoUI(); }
+
+    async function startWave() {
+        if (isWaveActive) return; isWaveActive = true; round++; document.getElementById('startBtn').disabled = true;
+        const count = 5 + round * 4;
+        for (let i = 0; i < count; i++) {
+            while(isPaused) await new Promise(r => setTimeout(r, 100));
+            // Progressive difficulty logic
+            let maxTier = Math.min(BALLOON_TIERS.length - 1, Math.floor(round / 3.5));
+            let tier = Math.floor(Math.random() * (maxTier + 1));
+            if (i > count * 0.8) tier = maxTier; // Boss types at end of wave
+            enemies.push(new Enemy(tier));
+            await new Promise(r => setTimeout(r, (850 - Math.min(round * 15, 600)) / gameSpeed));
+        }
+    }
+
+    function loop() {
+        if (!isPaused) {
+            ctx.save(); if (shake > 0) { ctx.translate(Math.random()*shake-shake/2, Math.random()*shake-shake/2); shake *= 0.85; if(shake<0.5) shake=0; }
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#2980b9'; ctx.fillRect(WATER_RECT.x, WATER_RECT.y, WATER_RECT.w, WATER_RECT.h);
+            ctx.strokeStyle = '#95a5a6'; ctx.lineWidth = 45; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+            ctx.beginPath(); ctx.moveTo(PATH[0].x, PATH[0].y); PATH.forEach(p => ctx.lineTo(p.x, p.y)); ctx.stroke();
+            towers.forEach(t => { t.update(); t.draw(); }); projectiles = projectiles.filter(p => !p.update()); projectiles.forEach(p => p.draw());
+            enemies = enemies.filter(e => { if (e.hp <= 0) { money += (10 + e.tier * 2); return false; } return true; }); enemies.forEach(e => { e.update(); e.draw(); });
+            hitEffects = hitEffects.filter(h => h.life > 0); hitEffects.forEach(h => h.draw());
+            if (selectedType) {
+                const data = ANIMAL_TYPES[selectedType]; const inWater = (mouseX > WATER_RECT.x && mouseX < WATER_RECT.x + WATER_RECT.w); const valid = (data.type === 'water' && inWater) || (data.type === 'land' && !inWater);
+                ctx.globalAlpha = 0.4; ctx.beginPath(); ctx.arc(mouseX, mouseY, data.range, 0, Math.PI*2); ctx.fillStyle = valid ? 'white' : 'red'; ctx.fill(); ctx.font = "34px Arial"; ctx.fillText(data.label, mouseX, mouseY + 12); ctx.globalAlpha = 1.0;
+            }
+            ctx.restore();
+            document.getElementById('money').innerText = Math.floor(money); document.getElementById('lives').innerText = lives; document.getElementById('round').innerText = round;
+            if (enemies.length === 0 && isWaveActive) { isWaveActive = false; document.getElementById('startBtn').disabled = false; money += (50 + round * 10); }
+        } else { ctx.fillStyle = 'rgba(255,255,255,0.2)'; ctx.fillRect(0, 0, 950, 45); ctx.fillStyle = '#000'; ctx.font = 'bold 20px Arial'; ctx.textAlign = 'center'; ctx.fillText("GAME PAUSED", 475, 30); }
+        if (lives <= 0) { alert("Game Over! Round: " + round); location.reload(); return; }
+        requestAnimationFrame(loop);
+    }
+
+    const shop = document.getElementById('shop');
+    for (let key in ANIMAL_TYPES) {
+        const item = ANIMAL_TYPES[key]; const div = document.createElement('div'); div.className = 'shop-item';
+        div.innerHTML = `<span>${item.label}</span><label>${item.name}<br>$${item.cost}</label>`;
+        div.onclick = () => { selectedType = key; selectedTowerInstance = null; document.querySelectorAll('.shop-item').forEach(el => el.classList.remove('active')); div.classList.add('active'); updateEvoUI(); };
+        shop.appendChild(div);
+    }
+    loop();
+</script>
+</body>
+</html>
